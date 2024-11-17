@@ -7,13 +7,8 @@ from torchvision import datasets, transforms, models
 from PIL import Image
 import json
 import numpy as np
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report
 from torch.cuda.amp import GradScaler, autocast
-
-# Load custom class names from JSON
-with open('class_names.json', 'r') as f:
-    class_data = json.load(f)
-class_names = class_data['classes']
 
 # Verify CUDA availability
 print("Is CUDA available?", torch.cuda.is_available())
@@ -55,9 +50,36 @@ train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, pin_memory
 val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False, pin_memory=True)
 test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False, pin_memory=True)
 
+# Map class indices to class names using the dataset's class_to_idx
+# Ensure the class names from the JSON match the folder names
+# Load class names from JSON
+with open('class_names.json', 'r') as f:
+    class_data = json.load(f)
+json_class_names = class_data['classes']
+
+# Get the class_to_idx mapping from the training dataset
+class_to_idx = train_dataset.class_to_idx
+
+# Create idx_to_class mapping
+idx_to_class = {v: k for k, v in class_to_idx.items()}
+
+# Verify that class names in JSON match the dataset classes
+dataset_classes = [idx_to_class[i] for i in range(len(idx_to_class))]
+if set(json_class_names) != set(dataset_classes):
+    raise ValueError("Class names in JSON do not match dataset class names.")
+
+# Sort json_class_names based on dataset_classes order
+# We need to map the indices correctly
+sorted_class_names = [None] * len(json_class_names)
+for idx in range(len(json_class_names)):
+    class_name = idx_to_class[idx]
+    sorted_class_names[idx] = class_name
+
+# Now, 'sorted_class_names' should be in the same order as class indices used by the datasets
+num_classes = len(sorted_class_names)
+
 # Define the model (using a pre-trained ResNet50 and modifying the final layer)
-model = models.resnet50(pretrained=True)
-num_classes = len(class_names)  # Use custom class count from JSON
+model = models.resnet50(weights='IMAGENET1K_V1')
 num_features = model.fc.in_features
 model.fc = nn.Linear(num_features, num_classes)
 model = model.to(device)  # Move model to GPU
@@ -129,8 +151,13 @@ def evaluate_model(loader):
             all_labels.extend(labels.cpu().numpy())
     acc = 100 * correct / total
     avg_loss = total_loss / len(loader)
-    # Calculate other metrics
-    class_report = classification_report(all_labels, all_preds, target_names=class_names)
+    # Calculate classification report
+    class_report = classification_report(
+        all_labels,
+        all_preds,
+        target_names=sorted_class_names,
+        output_dict=True
+    )
     return acc, class_report, avg_loss
 
 # Run training
@@ -145,7 +172,11 @@ model.load_state_dict(torch.load('best_model.pth'))
 test_acc, test_report, test_loss = evaluate_model(test_loader)
 print(f"Test Accuracy: {test_acc:.2f}%")
 print("Classification Report:")
-print(test_report)
+print(classification_report(
+    test_dataset.targets,
+    [p for p in np.concatenate([predicted.cpu().numpy() for images, _ in test_loader for predicted in [torch.max(model(images.to(device)), 1)[1]]])],
+    target_names=sorted_class_names
+))
 
 # Save the model's state dictionary
 model_save_path = "food_classifier_model.pth"
@@ -161,7 +192,7 @@ def predict_image(image_path):
     with torch.no_grad():
         output = model(image)
         _, predicted = torch.max(output, 1)
-        class_name = class_names[predicted.item()]
+        class_name = sorted_class_names[predicted.item()]
         return class_name
 
 # Example of using inference
